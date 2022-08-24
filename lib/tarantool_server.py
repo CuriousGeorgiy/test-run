@@ -503,6 +503,30 @@ class TarantoolLog(object):
 
         return False
 
+    def get_iproto_port(self, msg, deadline=None):
+        with open(self.path, 'r') as f:
+            f.seek(self.log_begin, os.SEEK_SET)
+            cur_pos = self.log_begin
+            while not deadline or time.time() < deadline:
+                log_str = f.readline()
+                if not log_str:
+                    # We reached the end of the logfile and found nothing,
+                    # so box.cfg.listen is not defined.
+                    return 0
+                else:
+                    # if the whole line is read, check the pattern in the line.
+                    # Otherwise, set the cursor back to read the line again.
+                    if log_str.endswith('\n'):
+                        if re.findall(msg, log_str):
+                            return int(
+                                log_str.split(msg)[1].rsplit(':', maxsplit=1)[1]
+                            )
+                    else:
+                        gevent.sleep(0.001)
+                        f.seek(cur_pos, os.SEEK_SET)
+                        continue
+                cur_pos = f.tell()
+
 
 class TarantoolServer(Server):
     default_tarantool = {
@@ -767,14 +791,14 @@ class TarantoolServer(Server):
             warn_unix_socket(path)
             self._admin = path
         else:
-            self._admin = find_port()
+            self._admin = 0
 
         if self.use_unix_sockets_iproto:
             path = os.path.join(self.vardir, self.name + ".i")
             warn_unix_socket(path)
             self._iproto = path
         else:
-            self._iproto = find_port()
+            self._iproto = 0
 
         # these sockets will be created by tarantool itself
         path = os.path.join(self.vardir, self.name + '.control')
@@ -872,6 +896,10 @@ class TarantoolServer(Server):
         color_log(prefix_each_line(' | ', self.version()) + '\n',
                   schema='version')
 
+        if not self.use_unix_sockets_iproto:
+            if self.iproto.port > 0:
+                self._iproto = 0
+
         os.putenv("LISTEN", self.iproto.uri)
         os.putenv("ADMIN", self.admin.uri)
         if self.rpl_master:
@@ -886,6 +914,7 @@ class TarantoolServer(Server):
 
         # redirect stdout from tarantoolctl and tarantool
         os.putenv("TEST_WORKDIR", self.vardir)
+        color_stdout('*******', args, '******')
         self.process = subprocess.Popen(args,
                                         cwd=self.vardir,
                                         stdout=self.log_des,
@@ -906,8 +935,13 @@ class TarantoolServer(Server):
         self.crash_detector.info = "Crash detector: %s" % self.process
         self.crash_detector.start()
 
+        if not self.use_unix_sockets:
+            time.sleep(10)
+            self._admin = int(open('/tmp/qwe.txt').read().strip())
+            color_stdout('***', int(open('/tmp/qwe.txt').read().strip()), '***')
+
+        deadline = time.time() + Options().args.server_start_timeout
         if wait:
-            deadline = time.time() + Options().args.server_start_timeout
             try:
                 self.wait_until_started(wait_load, deadline)
             except TarantoolStartError as err:
@@ -931,10 +965,19 @@ class TarantoolServer(Server):
                     raise
                 self.kill_current_test()
 
-        port = self.admin.port
-        self.admin.disconnect()
-        self.admin = CON_SWITCH[self.tests_type]('localhost', port)
+        # port = self.admin.port
+        # self.admin.disconnect()
+        # self.admin = CON_SWITCH[self.tests_type]('localhost', port)
         self.status = 'started'
+
+        # if not self.use_unix_sockets:
+        #     self._admin = int(open('/tmp/qwe.txt').read().strip())
+        #     color_stdout('***', self.admin.uri, '***')
+
+        if not self.use_unix_sockets_iproto:
+            if self.iproto.port == 0:
+                self._iproto = self.logfile_pos.get_iproto_port(
+                    'tx_binary: bound to', deadline)
 
         # Verify that the schema actually was not upgraded.
         if self.disable_schema_upgrade:
