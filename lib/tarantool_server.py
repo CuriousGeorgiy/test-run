@@ -662,6 +662,10 @@ class TarantoolServer(Server):
                              ' Server class, his derivation or None')
         self._rpl_master = val
 
+    @property
+    def portfile(self):
+        return os.path.join(self.vardir, '%s.port' % self.name)
+
     # ----------------------------------------------------------------------- #
 
     def __new__(cls, ini=None, *args, **kwargs):
@@ -896,6 +900,10 @@ class TarantoolServer(Server):
         color_log(prefix_each_line(' | ', self.version()) + '\n',
                   schema='version')
 
+        if not self.use_unix_sockets:
+            with open(self.portfile, 'w') as f:
+                f.write('0')
+
         if not self.use_unix_sockets_iproto:
             if self.iproto.port > 0:
                 self._iproto = 0
@@ -914,7 +922,6 @@ class TarantoolServer(Server):
 
         # redirect stdout from tarantoolctl and tarantool
         os.putenv("TEST_WORKDIR", self.vardir)
-        color_stdout('*******', args, '******')
         self.process = subprocess.Popen(args,
                                         cwd=self.vardir,
                                         stdout=self.log_des,
@@ -935,12 +942,18 @@ class TarantoolServer(Server):
         self.crash_detector.info = "Crash detector: %s" % self.process
         self.crash_detector.start()
 
-        if not self.use_unix_sockets:
-            time.sleep(10)
-            self._admin = int(open('/tmp/qwe.txt').read().strip())
-            color_stdout('***', int(open('/tmp/qwe.txt').read().strip()), '***')
-
         deadline = time.time() + Options().args.server_start_timeout
+
+        if not self.use_unix_sockets:
+            with open(self.portfile) as f:
+                while not deadline or time.time() < deadline:
+                    port = int(f.read().strip())
+                    if port > 0:
+                        self._admin = port
+                        break
+                    f.seek(0, os.SEEK_SET)
+                    gevent.sleep(0.1)
+
         if wait:
             try:
                 self.wait_until_started(wait_load, deadline)
@@ -965,14 +978,10 @@ class TarantoolServer(Server):
                     raise
                 self.kill_current_test()
 
-        # port = self.admin.port
-        # self.admin.disconnect()
-        # self.admin = CON_SWITCH[self.tests_type]('localhost', port)
+        port = self.admin.port
+        self.admin.disconnect()
+        self.admin = CON_SWITCH[self.tests_type]('localhost', port)
         self.status = 'started'
-
-        # if not self.use_unix_sockets:
-        #     self._admin = int(open('/tmp/qwe.txt').read().strip())
-        #     color_stdout('***', self.admin.uri, '***')
 
         if not self.use_unix_sockets_iproto:
             if self.iproto.port == 0:
